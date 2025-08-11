@@ -1,62 +1,45 @@
 from jsonpath_ng import parse
 from pyspark.sql.functions import pandas_udf, udf
-from pyspark.sql.types import StringType, ArrayType, StructType
+from pyspark.sql.types import StringType, ArrayType, StructType, Row
 import pandas as pd
 from typing import Union, Callable
 
+
 # Get the first match of a JSONPath expression in a StructType column
-@pandas_udf(StringType())
-def get_value(root:Union[pd.Series,pd.DataFrame], path: pd.Series) -> pd.Series:
+@udf(StringType())
+def get_value(struct_dict: Union[Row,list], path: str) -> str:
     """
-    Evaluate JSONPath on each StructType (represented as a Python dict) and return the first string match
+    Evaluate JSONPath on a StructType (represented as a Python dict) and return the first string match
     or None if no match.
     """
-    compiled_exprs = {}
-    results = []
-
-    row_iterator = (row._asdict() for row in root.itertuples(index=False)) if isinstance(root, pd.DataFrame) else root
-
-    for struct_dict, expr in zip(row_iterator, path):
-        # compile JSONPath expression once per unique path
-        json_expr = compiled_exprs.get(expr)
-        if json_expr is None:
-            json_expr = parse(expr)
-            compiled_exprs[expr] = json_expr
-
-        matches = [match.value for match in json_expr.find(struct_dict)]
-
-        if matches:
-            results.append(str(matches[0]))
-        else:
-            results.append(None)
-
-    return pd.Series(results)
+    if isinstance(struct_dict, Row):
+        struct_dict = struct_dict.asDict(recursive=True)
+    elif isinstance(struct_dict, list):
+        struct_dict = [row.asDict(recursive=True) for row in struct_dict]
+        
+    if not struct_dict or not path:
+        return None
+    json_expr = parse(path)
+    matches = [match.value for match in json_expr.find(struct_dict)]
+    return str(matches[0]) if matches else None
 
 
 # Get all matches of a JSONPath expression in a StructType column
-@pandas_udf(ArrayType(StringType()))
-def get_all_values(root:Union[pd.Series,pd.DataFrame], path: pd.Series) -> pd.Series:
+@udf(ArrayType(StringType()))
+def get_all_values(struct_dict: Union[Row,list], path: str) -> list:
     """
-    Evaluate JSONPath on each StructType (represented as a Python dict) and return all string matches
+    Evaluate JSONPath on a StructType (represented as a Python dict) and return all string matches
     or an empty list if no match.
     """
-    compiled_exprs = {}
-    results = []
+    if isinstance(struct_dict, Row):
+        struct_dict = struct_dict.asDict(recursive=True)
+    elif isinstance(struct_dict, list):
+        struct_dict = [row.asDict(recursive=True) for row in struct_dict]
 
-    row_iterator = (row._asdict() for row in root.itertuples(index=False)) if isinstance(root, pd.DataFrame) else root
-
-    for struct_dict, expr in zip(row_iterator, path):
-        # compile JSONPath expression once per unique path
-        json_expr = compiled_exprs.get(expr)
-        if json_expr is None:
-            json_expr = parse(expr)
-            compiled_exprs[expr] = json_expr
-
-        matches = [str(match.value) for match in json_expr.find(struct_dict)]
-
-        results.append(matches)
-
-    return pd.Series(results)
+    if not struct_dict or not path:
+        return []
+    json_expr = parse(path)
+    return [str(match.value) for match in json_expr.find(struct_dict)]
 
 
 def makeStructUpdateUDF(jsonpath: str, func: Callable, schema: StructType) -> Callable:
@@ -76,9 +59,7 @@ def makeStructUpdateUDF(jsonpath: str, func: Callable, schema: StructType) -> Ca
         # Spark will convert the dict back to a Row based on the schema
         obj_dict = struct_obj.asDict(recursive=True)
         jsonpath_expr.update(obj_dict, func)
-        # The underlying structUpdate expects a function with 3 args,
-        # but we want the user to provide a simple function with 1 arg.
-        # This lambda bridges that gap.
+
         return obj_dict
 
     return udf(_update_worker, schema)
